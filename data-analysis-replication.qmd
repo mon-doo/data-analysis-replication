@@ -1,0 +1,155 @@
+---
+title: "Data-Analysis-Replication"
+format: html
+editor: visual
+---
+
+# Data Analysis Replication - Lionfish Population Analysis
+
+#### Monica Dooley
+
+## Introduction
+
+This document takes you through my attempt at replicating some of the work done by Johnson & Swenarton (2016) in analyzing population data for invasive lionfish off the coast of northeast Florida. The study was initially conducted to investigate the life history of the species in this invaded environment to inform culling and conservation efforts within this ecosystem. The authors analyzed the population structure, growth patterns, and ages of the population through developing and validating a length-based age-structured model. I will walk you through my efforts at recreating parts of their analysis using the raw data linked in the supplementary information of the study!
+
+## Part 1 - Data Investigation and Wrangling
+
+First, we will load all of the R packages we will need to perform these steps in R!
+
+```{r}
+knitr::opts_chunk$set(fig.path = "images/")
+library(tidyverse)
+library(tidyr)
+library(dplyr)
+library(tibble)
+library(fixr)
+library(ggplot2)
+library(TropFishR)
+library(zoo)
+```
+
+Now, we will read in the data to a a tibble named "d" and take a quick peek at how it looks:
+
+```{r}
+d <- read_csv("https://raw.githubusercontent.com/mon-doo/data-analysis-replication/refs/heads/main/data/Lionfish_length-frequency_data_-_Johnson_and_Swenarton.csv")
+head(d)
+```
+
+We can see that the data looks a little messy, as there are several extra empty columns at the end, the data is in a summarized format rather than raw, and the column names have spaces between the words, which is a big no-no! However, the data does appear as described in the paper. We have a column of total length values divided into 10mm bins. We also have columns for each Month/Year of data collection with counts of how many fish were caught within each Total Length bin. We obviously need to clean up this data with all the empty columns, but the paper also states that only data collected in 2014 was used for analyses since the other collection dates had too little data. We will clean up, winnow down, and reformat the data here:
+
+```{r}
+d <- d |> 
+  subset(select =-...11:-...21) |>
+  fix_col_spaces()
+d <- d |> subset(select = -April_2013:-August_2013) |>
+  subset(select = -August_2015)
+dat <- d |> subset(select = -January_2015)
+d <- d |> pivot_longer(cols = c(2:7), names_to = "month", values_to = "value")
+c1 <- c("Total_length_(TL)", "2014-04", "2014-07", "2014-08", "2014-10", "2014-11")
+colnames(dat) = c1
+dat <- dat |> pivot_longer(cols = c(2:6), names_to = "month", values_to = "value")
+d_new <- tibble(tl = numeric(), month = character())
+for (i in 1:nrow(dat)){
+  records <- rep(dat[i,]$`Total_length_(TL)`, dat[i, ]$`value`)
+  temp <- tibble(tl = records, month = dat[i, ]$`month`)
+  d_new <- bind_rows(d_new, temp)
+}
+d_new$month <- as.Date(as.yearmon(d_new$month))
+
+tail(d)
+head(d_new)
+```
+
+We now have two different versions of our data set. Tibble "d" contains all the data from 2014 as well as January 2015. Tibble "d_new" contains only the data from 2014. The d_new data is also in proper raw format where each row is one "observation" or one fish that was caught with the length value (tl) and time caught (month) (which is converted to a "date" format that can more easily be interpreted by later functions) recorded. These two tibbles will be used for different parts of this replication, so pay careful attention to the names of tibbles being used!
+
+## Part 2 - Descriptive Statistic Replication
+
+This first analysis is fortunately quite simple! The only truly descriptive statistics I could identify in this study was analyzing the total number of fish sampled, the range of the length data in the study population, and the month when the longest and shortest fish were caught. which we will analyze now
+
+```{r}
+(nrow(d_new))
+(range(d_new$tl))
+(d_new$month[1])
+(d_new$month[3812])
+```
+
+Here, we see that our data set has a total number of 3,812 fish, lengths ranging from 40 to 450mm, and both the longest and shortest fish were caught in August 2014. This is not quite the same as the paper, which reports a total of 2,137 fish and lengths from 41 to 488mm. The time when the longest and shortest fish were caught is fortunately the same! The rounding on the length data on our set is due to the raw data being summarized and placed into 10mm bins already, so 41mm becomes 40 and 448mm becomes 450. The difference in the total number of fish in the data set is perplexing, but I believe the issue may become more clear during the visualization section.
+
+## Part 3 - Inferential Statistics
+
+This study used models which use length as a proxy for age to estimate the proportion of fish of a given size of each age class by fitting a predicted length frequency distribution to the data. The predicted length frequency distribution was generated by estimating the mean-size-at-age using the traditional or seasonalized von Bertalanffy growth function (VBGF) formulas, which expresses fish length as a function of age. The study ran four different models, described in the table below, which varied in seasonal growth and variation within age groups (σ2 at age).
+
+\<img src="images/Table%201.PNG" width="###px"/\>
+
+This study performed all analyses in excel, and since I was unable to find an R package that would allow me to perform VBGFs while manipulating the variation among age groups, I could only replicate 2 models, though I am unsure if they are models 1 and 3 or models 2 and 4 as I was not able to assess how variation among age groups was treated. Thus, I perform below a seasonal and non-seasonal VBGF and extract the resulting parameters that were estimated. First, I convert the d_new data set into a length frequency data object (d_lfq). Then I run the two models using the ELEFAN_SA function from TropFishR, which does not require age data and can incorporate seasonality in the growth. I set the upper and lower limits for all of the estimated parameters to be across the full range of values (0 to 1 for t_anchor/tb, ts, and C and 0 to 4 for K). As they did in the original study, I held the asymptotic length (Linf) value fixed at 448, which is the highest length of fish in the data set. I also set the max age to 3 based on additional aging analysis done by the researchers that showed no fish older than 3 in the population. This code block will take some time.
+
+```{r}
+d_lfq <- lfqCreate(data=d_new, Lname="tl", Dname = "month", bin_size = 10)
+mod1 <- ELEFAN_SA(d_lfq, seasonalised = TRUE, low_par = list(Linf = 447.999999999, K=0.00, t_anchor=0, ts=0, C=0),
+                  up_par = list(Linf = 448,K=4.00, t_anchor=1, ts=1, C=1), MA = 5, agemax = 3)
+mod2 <- ELEFAN_SA(d_lfq, seasonalised = FALSE, low_par = list(Linf = 447.999999999, K=0.00, t_anchor=0, ts=0, C=0),
+                  up_par = list(Linf = 448,K=4.00, t_anchor=1, ts=1, C=1), MA = 5, agemax = 3)
+(mod1$par)
+(mod2$par)
+```
+
+We can compare my results for the VGBF parameters K, C, ts, and t_anchor/tb to those of the original study, which are shown in the following table:
+
+\<img src="images/Table%202.PNG" width="###px"/\>
+
+As we can see, my first model estimated K (the Brody growth coefficient) at 0.43, which is not horrifically far from the original study's models 1 and 2 estimations of 0.47 and 0.46! However, my model predicted low seasonality (C = 0.23) while the original study showed high seasonality (0.61 and 0.63), and the timing of seasonal growth (ts) for my model (0.53) is much later than the original study's (0.21 and 0.24). Lastly, my model predicted seasonal recruitment (t_anchor/tb) to occur much later in the year (0.89) than the study (0.44 and 0.40). My second model estimated K at 0.43 and t_anchor/tb at 0.92 compared to the original study's models 3 and 4 with 0.47 and 0.46 for K and 0.36 and 0.34 for t_anchor/tb.
+
+While my growth coefficients weren't so far off, both of my models did not replicate the original study's models very closely. I believe this is largely due to the differences in how I was able to run the models. First, I was unable to measure nor account for variation within age groups. Second, I had to provide the full range of values for the estimated parameters because I had no reason to limit them or provide reasonable starting values, but this does have some influence on the resulting estimations. Lastly, the MA value in the model, which determines how many bins must be crossed when making estimations in the model, has significant influence over the results, but it was not used or described in the original study, so I had to leave it at the default of 5. All of these absolutely could have influenced my results.
+
+I could have potentially used different R packages and sets of functions that more similarly mirrored the excel functions used by the original study, but these all required age data, which I did not have. It can be estimated using an age-at-length key, which upon further reading of the methods, it appears these researchers did use from a smaller subset of lionfish that were aged. However, this data was not provided.
+
+## Part 4 - Visual Replication
+
+I attempted to replicate their histograms shown in figure 2 of the study, shown below
+
+\<img src="images/fig-2-2x.jpg" width="###px"/\>
+
+However, due to my limitations on the R packages and functions I could use, I was unable to plot the curves over the histograms. Still, my plotting of this figure reveals a discrepancy between the published data set and the one used in the study. As you can see the only difference in my replicated figure is in the August 2014 plot, which looks very different from the original .I believe this also led to the differences in my counts of total fish in the study population from Part 2 (look especially at the y-axes) as well as contributed to the differences in my parameter estimations in Part 3. Also, this figure for some reason includes January 2015, despite it not being used in the analysis, as only 2014 data was used, and I could not figure out why from reading the methods.
+
+```{r}
+(p <- ggplot(data = d_pivot, aes(x = `Total_length_(TL)`, y = value)) +
+    geom_bar(stat = "identity") +
+    facet_wrap(~factor(month, levels = c("April_2014", "October_2014","July_2014", "November_2014", "August_2014", "January_2015")), ncol =2, scales = "free"))
+
+```
+
+I also attempted to replicate Figure 4 from the paper, which of course also went abysmally. My lines overlapped too much to view on the same plot, so I had to separate it into two, and the y-axes are insanely off–showing predicted negative values for length, which is impossible. Still, the seasonal plot is wiggly while the non-seasonal plot is smooth, so maybe that counts for something. Below is the original figure followed by my plots
+
+\<img src="images/fig-2-2x.jpg" width="###px"/\>
+
+```{r}
+t <- seq(0, 3, length.out = 200)
+Lt <- VBGF(param = list(Linf = 448, K = 0.4277936, t_anchor = 0.888901, C = 0.2310452, ts = 0.5349782), t =t)
+plot(t, Lt, xlab="Age (years)", ylab="Length (mm)")
+Lt2 <- VBGF(param = list(Linf = 448, K = 0.4273379, t_anchor = 0.9203679), t =t)
+plot(t, Lt2, xlab="Age (years)", ylab="Length (mm)")
+```
+
+Overall, this replication project was able to replicate the original study with very limited success. I attribute this to a combination of data discrepancies from what is published versus used in the original study, limitations and differences based on using R instead of excel, and my own incompetency.
+
+## Glossary Terms
+
+Total Length Values - measurements of the total length of the fish, which were aggregated and rounded into 10mm increments
+
+Asymptotic length (Linf) - the maximum length that can be achieved by the study species, typically set as the highest length in the study set
+
+Length frequency data object - a type of R object used by functions in TropRFish to analyze such data
+
+K - the Brody Growth Coefficient estimated for the study population
+
+C - The measure of seasonality estimated for the study populations, higher values mean higher seasonality and larger oscillations
+
+ts - the time point estimate, relevant to the winter point of lowest growth, the sets when the seasonality will occur and is estimated for the study population
+
+t_anchor/tb - the time of year when new recruitment occurs and is estimated for the study population
+
+MA - moving average, number indicating over how many length classes the moving average should be performed in the analysis, default is 5, best practice it should approximate the number of bins spanning the width of a cohort following recruitment.
+
+agemax = maximum age of the study population
+
+Age-at-length key - a key of recorded age and length values for a subset of a population thatcan be used to assign ages to length values where age was not measured
